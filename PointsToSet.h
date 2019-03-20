@@ -37,8 +37,9 @@ public:
         abort();
         /*
         bool changed = nodes.unset(getNodeID(target));
-        if(nodes.empty())
+        if(nodes.empty()) {
             offsets.reset();
+        }
         return changed;
         */
     }
@@ -130,6 +131,7 @@ public:
                 changed |= pointers.unset(kv.second);
             }
         }
+        return changed;
     }
     
     void clear() { 
@@ -180,5 +182,282 @@ public:
 
     void swap(BitvectorPointsToSet2& rhs) {
         pointers.swap(rhs.pointers);
+    }
+};
+
+class BitvectorPointsToSet3 {
+    
+    ADT::SparseBitvector pointers;
+    std::set<Pointer> largePointers;
+    static std::map<PSNode*,size_t> ids;
+
+    size_t getNodeID(PSNode *node) const {
+        auto it = ids.find(node);
+        if(it != ids.end())
+            return it->second;
+        return ids.emplace_hint(it, node, ids.size() + 1)->second;
+    }
+    
+    size_t getNodePosition(PSNode *node) const {
+        return ((getNodeID(node) - 1) * 64);
+    }
+    
+public:
+    bool add(PSNode *target, Offset off) {
+        if(off.isUnknown()) {
+            return pointers.set(getNodePosition(target) + 63); 
+        } else if(off < 63) {
+            return pointers.set(getNodePosition(target) + off.offset);
+        } else {
+            return largePointers.emplace(target, off).second;
+        }
+    }
+
+    bool add(const Pointer& ptr) {
+        return add(ptr.target, ptr.offset);
+    }
+
+    bool add(const BitvectorPointsToSet3& S) {
+        bool changed = pointers.set(S.pointers);
+        for (const auto& ptr : S.largePointers) {
+            changed |= largePointers.insert(ptr).second;
+        }
+        return changed;
+    }
+
+    bool remove(const Pointer& ptr) {
+        if(ptr.offset.isUnknown()) {
+            return pointers.unset(getNodePosition(ptr.target) + 63); 
+        } else if(ptr.offset < 63) {
+            return pointers.unset(getNodePosition(ptr.target) + ptr.offset.offset);
+        } else {
+            return largePointers.erase(ptr) != 0;
+        }
+    }
+    
+    bool remove(PSNode *target, Offset offset) {
+        return remove(Pointer(target,offset));
+    }
+    
+    bool removeAny(PSNode *target) {
+        bool changed = false;
+        size_t position = getNodePosition(target);
+        for(size_t i = position; i <  position + 64; i++) {
+            changed |= pointers.unset(i);
+        }
+        auto it = largePointers.begin();
+        while(it != largePointers.end()) {
+            if(it->target == target) {
+                it = largePointers.erase(it);
+                changed = true;
+            }
+            else {
+                it++;
+            }
+        }
+        return changed;
+    }
+    
+    void clear() { 
+        pointers.reset();
+        largePointers.clear();
+    }
+   
+    bool pointsTo(const Pointer& ptr) const {
+        return pointers.get(getNodePosition(ptr.target) + ptr.offset.offset)
+                || largePointers.find(ptr) != largePointers.end();
+    }
+
+    bool mayPointTo(const Pointer& ptr) const {
+        return pointsTo(ptr)
+                || pointsTo(Pointer(ptr.target, Offset::UNKNOWN));
+    }
+
+    bool mustPointTo(const Pointer& ptr) const {
+        assert(!ptr.offset.isUnknown() && "Makes no sense");
+        return pointsTo(ptr) && isSingleton();
+    }
+
+    bool pointsToTarget(PSNode *target) const {
+        size_t position = getNodePosition(target);
+        for(size_t i = position; i <  position + 64; i++) {
+            if(pointers.get(i))
+                return true;
+        }
+        for (const auto& ptr : largePointers) {
+            if (ptr.target == target)
+                return true;
+        }
+        return false;
+    }
+
+    bool isSingleton() const {
+        return (pointers.size() == 1 && largePointers.size() == 0)
+                || (pointers.size() == 0 && largePointers.size() == 1);
+    }
+
+    bool empty() const {
+        return pointers.size() == 0
+                && largePointers.size() == 0;
+    }
+
+    size_t count(const Pointer& ptr) const {
+        return pointsTo(ptr);
+    }
+
+    bool has(const Pointer& ptr) const {
+        return count(ptr) > 0;
+    }
+
+    size_t size() const {
+        return pointers.size() + largePointers.size();
+    }
+
+    void swap(BitvectorPointsToSet3& rhs) {
+        pointers.swap(rhs.pointers);
+        largePointers.swap(rhs.largePointers);
+    }
+};
+
+class BitvectorPointsToSet4 {
+    
+    const unsigned int multiplier = 4;
+    
+    ADT::SparseBitvector pointers;
+    std::set<Pointer> oddPointers;
+    static std::map<PSNode*,size_t> ids;
+
+    size_t getNodeID(PSNode *node) const {
+        auto it = ids.find(node);
+        if(it != ids.end())
+            return it->second;
+        return ids.emplace_hint(it, node, ids.size() + 1)->second;
+    }
+    
+    size_t getNodePosition(PSNode *node) const {
+        return ((getNodeID(node) - 1) * 64);
+    }
+    
+    size_t getOffsetPosition(PSNode *node, Offset off) const {
+        if(off.isUnknown()) {
+            return getNodePosition(node) + 63;
+        }
+        return getNodePosition(node) + (*off / multiplier);
+    }
+    
+    bool isOffsetValid(Offset off) const {
+        return off.isUnknown() 
+                || (*off <= 62 * multiplier && *off % multiplier == 0);
+    }
+    
+public:
+    bool add(PSNode *target, Offset off) {
+        if(isOffsetValid(off)) {
+            return pointers.set(getOffsetPosition(target, off));
+        }
+        return oddPointers.emplace(target,off).second;
+        
+    }
+
+    bool add(const Pointer& ptr) {
+        return add(ptr.target, ptr.offset);
+    }
+
+    bool add(const BitvectorPointsToSet4& S) {
+        bool changed = pointers.set(S.pointers);
+        for (const auto& ptr : S.oddPointers) {
+            changed |= oddPointers.insert(ptr).second;
+        }
+        return changed;
+    }
+
+    bool remove(const Pointer& ptr) {
+        if(isOffsetValid(ptr.offset)) {
+            return pointers.unset(getOffsetPosition(ptr.target, ptr.offset)); 
+        }
+        return oddPointers.erase(ptr) != 0;
+    }
+    
+    bool remove(PSNode *target, Offset offset) {
+        return remove(Pointer(target,offset));
+    }
+    
+    bool removeAny(PSNode *target) {
+        bool changed = false;
+        size_t position = getNodePosition(target);
+        for(size_t i = position; i <  position + 64; i++) {
+            changed |= pointers.unset(i);
+        }
+        auto it = oddPointers.begin();
+        while(it != oddPointers.end()) {
+            if(it->target == target) {
+                it = oddPointers.erase(it);
+                changed = true;
+            }
+            else {
+                it++;
+            }
+        }
+        return changed;
+    }
+    
+    void clear() { 
+        pointers.reset();
+        oddPointers.clear();
+    }
+   
+    bool pointsTo(const Pointer& ptr) const {
+        return pointers.get(getOffsetPosition(ptr.target,ptr.offset))
+                || oddPointers.find(ptr) != oddPointers.end();
+    }
+
+    bool mayPointTo(const Pointer& ptr) const {
+        return pointsTo(ptr)
+                || pointsTo(Pointer(ptr.target, Offset::UNKNOWN));
+    }
+
+    bool mustPointTo(const Pointer& ptr) const {
+        assert(!ptr.offset.isUnknown() && "Makes no sense");
+        return pointsTo(ptr) && isSingleton();
+    }
+
+    bool pointsToTarget(PSNode *target) const {
+        size_t position = getNodePosition(target);
+        for(size_t i = position; i <  position + 64; i++) {
+            if(pointers.get(i))
+                return true;
+        }
+        for (const auto& ptr : oddPointers) {
+            if (ptr.target == target)
+                return true;
+        }
+        return false;
+    }
+
+    bool isSingleton() const {
+        return (pointers.size() == 1 && oddPointers.size() == 0)
+                || (pointers.size() == 0 && oddPointers.size() == 1);
+    }
+
+    bool empty() const {
+        return pointers.size() == 0
+                && oddPointers.size() == 0;
+    }
+
+    size_t count(const Pointer& ptr) const {
+        return pointsTo(ptr);
+    }
+
+    bool has(const Pointer& ptr) const {
+        return count(ptr) > 0;
+    }
+
+    size_t size() const {
+        return pointers.size() + oddPointers.size();
+    }
+
+    void swap(BitvectorPointsToSet4& rhs) {
+        pointers.swap(rhs.pointers);
+        oddPointers.swap(rhs.oddPointers);
     }
 };
